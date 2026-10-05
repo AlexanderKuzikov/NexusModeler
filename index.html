@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" href="data:," />
+<title>NEXUSMODELER — пропсы</title>
+<style>
+  :root{
+    --bg:#05070c; --ink:#cfe6ff; --dim:#5d7590;
+    --line:rgba(120,190,255,.16); --panel:rgba(8,14,22,.86);
+    --accent:#ff8a3c;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0;background:var(--bg);overflow:hidden}
+  body{font-family:ui-monospace,"SF Mono",Consolas,"Roboto Mono",monospace;
+    color:var(--ink);-webkit-font-smoothing:antialiased;user-select:none}
+  canvas{display:block}
+
+  header{position:absolute;top:18px;left:22px;z-index:5;pointer-events:none}
+  header h1{margin:0;font-size:14px;letter-spacing:.4em;font-weight:600;color:#eaf6ff;
+    text-shadow:0 0 18px rgba(255,138,60,.35)}
+  header .sub{margin-top:6px;font-size:10px;letter-spacing:.2em;color:var(--dim)}
+  header .bar{width:220px;height:2px;margin-top:10px;
+    background:linear-gradient(90deg,var(--accent),rgba(255,138,60,0));opacity:.8}
+
+  #dock{position:absolute;top:18px;right:20px;z-index:6;display:flex;gap:6px}
+  button{font:inherit;font-size:10px;letter-spacing:.14em;color:var(--ink);
+    background:rgba(10,16,24,.7);border:1px solid var(--line);padding:7px 11px;cursor:pointer;transition:.14s}
+  button:hover{background:rgba(30,46,64,.85)}
+  button.act{color:#0a0e15;background:var(--accent);border-color:var(--accent)}
+
+  #list{position:absolute;top:62px;right:20px;bottom:20px;width:262px;z-index:6;
+    overflow-y:auto;background:var(--panel);border:1px solid var(--line);
+    backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);padding:8px}
+  #list::-webkit-scrollbar{width:4px}
+  #list::-webkit-scrollbar-thumb{background:rgba(120,190,255,.22)}
+  #list h3{margin:2px 0 8px;font-size:9px;letter-spacing:.24em;color:var(--dim);font-weight:600}
+  .row{display:grid;grid-template-columns:22px 1fr auto;align-items:center;gap:7px;
+    padding:4px 6px;border-left:2px solid transparent;cursor:pointer;transition:.12s}
+  .row:hover{background:rgba(30,44,60,.7)}
+  .row.act{background:rgba(44,62,84,.9);border-left-color:var(--accent)}
+  .row .n{font-size:9px;color:var(--dim);text-align:right}
+  .row .t{font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row .b{font-size:8.5px;color:var(--dim);letter-spacing:.04em}
+  .kind{font-size:8px;letter-spacing:.1em;padding:1px 4px;border:1px solid var(--line);color:var(--dim)}
+  .group{margin:10px 0 4px;font-size:8.5px;letter-spacing:.2em;color:var(--accent);opacity:.85}
+
+  #stat{position:absolute;left:22px;bottom:18px;z-index:6;font-size:10px;line-height:1.7;
+    color:var(--dim);letter-spacing:.08em;pointer-events:none}
+  #stat b{color:var(--ink);font-weight:600}
+  #warn{position:absolute;left:22px;bottom:74px;z-index:6;font-size:10px;color:#ff6a4a;
+    letter-spacing:.08em;max-width:520px;pointer-events:none}
+
+  #hint{position:absolute;top:62px;left:22px;z-index:6;font-size:9.5px;color:var(--dim);
+    letter-spacing:.1em;line-height:1.8;pointer-events:none;max-width:330px}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>NEXUSMODELER</h1>
+  <div class="sub" id="head">—</div>
+  <div class="bar"></div>
+</header>
+
+<div id="hint">
+  ПЛАСТА 96 × 96 — сетка владельца, полная клетка = единица.<br>
+  ИГРОВОЕ РАССТОЯНИЕ — тот же кадр при 11…17 пикселях на единицу.
+</div>
+
+<div id="dock">
+  <button data-view="plate" class="act">Пласта 96 × 96</button>
+  <button data-view="game">Игровое расстояние</button>
+  <button data-view="slots">Слоты</button>
+</div>
+
+<div id="list"></div>
+<div id="stat"></div>
+<div id="warn"></div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.1/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { SLOTS } from './slots.js';
+import { SETS } from './sets.js';
+import { buildSlot } from './build.js';
+
+/* =============================================================
+   ВИТРИНА ПРОПСОВ
+
+   Три кадра, и третий — обязательный:
+     plate — вся плита 96 × 96 с дорогой, проверка «лес не закрыл дорогу»;
+     game  — тот же кадр при игровом масштабе, 11…17 пикселей на единицу;
+     slots — один слот крупно, проверка силуэта вблизи.
+
+   Геометрия берётся из build.js — того же кода, который пишет GLB. Второго
+   пути у формы здесь нет и не должно быть: иначе витрина и игра покажут
+   разное, а это ровно тот отказ, ради которого проекты разделены.
+   ============================================================= */
+
+const PLATE = 96;
+const setId = Object.keys(SETS)[0];
+const set = SETS[setId];
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(1);
+renderer.setSize(innerWidth, innerHeight, false);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+// Экспозиция выше единицы потому, что ACES уводит средние тона в темноту, а
+// контракт требует читаемости светлотой: модель, ушедшая в тень при просмотре,
+// в игре уйдёт ещё дальше.
+renderer.toneMappingExposure = 1.22;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0e15);
+scene.add(new THREE.HemisphereLight(0x8fb4e0, 0x2a2418, 2.6));
+const key = new THREE.DirectionalLight(0xfff2dc, 2.4);
+key.position.set(38, 62, 26);
+key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048);
+key.shadow.camera.left = -PLATE;
+key.shadow.camera.right = PLATE;
+key.shadow.camera.top = PLATE;
+key.shadow.camera.bottom = -PLATE;
+key.shadow.camera.far = 220;
+key.shadow.bias = -0.0009;
+scene.add(key);
+const fill = new THREE.DirectionalLight(0x8fb4e0, 0.55);
+fill.position.set(-40, 26, -30);
+scene.add(fill);
+
+// Плита: сетка 96 × 96 по карте владельца.
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(PLATE, PLATE),
+  new THREE.MeshLambertMaterial({ color: 0x3d4a33 }),
+);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// Сетка: каждая клетка тонко, каждый восьмой блок — толсто. Клетка = единица,
+// и без этого масштаб плиты нечем проверить.
+{
+  const fine = [], coarse = [];
+  for (let i = 0; i <= PLATE; i += 1) {
+    const a = -PLATE / 2 + i;
+    (i % 8 === 0 ? coarse : fine).push(a, 0.02, -PLATE / 2, a, 0.02, PLATE / 2);
+    (i % 8 === 0 ? coarse : fine).push(-PLATE / 2, 0.02, a, PLATE / 2, 0.02, a);
+  }
+  const add = (pairs, color, opacity) => {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pairs, 3));
+    scene.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color, transparent: true, opacity })));
+  };
+  add(fine, 0x9fd08a, 0.06);
+  add(coarse, 0x9fd08a, 0.2);
+}
+
+// Дорога: две полосы через плиту. Она обязана остаться читаемой под лесом —
+// это первая проверка витрины, а не украшение.
+const roadMat = new THREE.MeshLambertMaterial({ color: 0x6b6152 });
+const roadEdge = new THREE.MeshLambertMaterial({ color: 0x514a3f });
+const roads = [
+  { w: 7, d: PLATE, x: -18, z: 0 },
+  { w: PLATE, d: 6, x: 0, z: -26 },
+];
+for (const road of roads) {
+  const slab = new THREE.Mesh(new THREE.PlaneGeometry(road.w, road.d), roadMat);
+  slab.rotation.x = -Math.PI / 2;
+  slab.position.set(road.x, 0.03, road.z);
+  slab.receiveShadow = true;
+  scene.add(slab);
+  for (const s of [-1, 1]) {
+    const edge = new THREE.Mesh(
+      new THREE.PlaneGeometry(road.w === 7 ? 0.5 : PLATE, road.d === 7 ? PLATE : 0.5),
+      roadEdge,
+    );
+    edge.rotation.x = -Math.PI / 2;
+    edge.position.set(
+      road.x + (road.w === 7 ? s * (road.w / 2 + 0.25) : 0),
+      0.04,
+      road.z + (road.d === 7 ? 0 : s * (road.d / 2 + 0.25)),
+    );
+    scene.add(edge);
+  }
+}
+
+// Зона леса: суглинок, чтобы пропсы стояли на своей земле, а не на поле.
+{
+  const patch = new THREE.Mesh(
+    new THREE.PlaneGeometry(PLATE - 2, PLATE - 2),
+    new THREE.MeshLambertMaterial({ color: 0x44513a }),
+  );
+  patch.rotation.x = -Math.PI / 2;
+  patch.position.set(6, 0.01, 4);
+  patch.receiveShadow = true;
+  scene.add(patch);
+}
+
+/* ---------- модель слота в three ---------- */
+
+// COLOR_0 в build.js уже линейный, и three r160 тоже считает вершинные цвета
+// линейными. Конвертировать второй раз нельзя: модель уехала бы в темноту.
+function toMesh(model) {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(model.p, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(model.n, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(model.c, 4));
+  g.setIndex(model.i);
+  g.computeBoundingSphere();
+  const mesh = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ vertexColors: true }));
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
+/* Раскладка по плите: рядами по номерам слотов, дорога между колоннами и
+   между рядами. Раскладка обязана уважать дорогу — иначе витрина врала бы
+   ровно в том, что она проверяет: «лес не закрыл дорогу». */
+const COLUMNS = [-44, -36, -28, -24, -8, 4, 16, 28, 40];
+const ROWS = [-38, -18, 2, 20, 38];
+const ROAD_X = -18;
+const ROAD_Z = -26;
+const roadHalfX = 3.5 + 2.5;
+const roadHalfZ = 3 + 2.5;
+
+const models = new Map();
+const props = [];
+let totalTriangles = 0;
+
+for (const slot of SLOTS) {
+  const model = buildSlot(slot.n, set);
+  totalTriangles += model.triangles;
+  models.set(slot.n, model);
+
+  const index = slot.n - 1;
+  let x = COLUMNS[index % COLUMNS.length];
+  let z = ROWS[Math.floor(index / COLUMNS.length)];
+  // Сдвиг от дороги: пропс на клетке дороги закрыл бы её.
+  if (Math.abs(x - ROAD_X) < roadHalfX + slot.footprint) {
+    x += x < ROAD_X ? -(roadHalfX + slot.footprint) : roadHalfX + slot.footprint;
+  }
+  if (Math.abs(z - ROAD_Z) < roadHalfZ + slot.footprint) {
+    z += z < ROAD_Z ? -(roadHalfZ + slot.footprint) : roadHalfZ + slot.footprint;
+  }
+  const mesh = toMesh(model);
+  mesh.position.set(x, 0, z);
+  mesh.rotation.y = ((slot.n * 37) % 100) / 100 * Math.PI * 2;
+  scene.add(mesh);
+  props.push({ slot, mesh });
+}
+
+/* ---------- кадры ---------- */
+
+const perspective = new THREE.PerspectiveCamera(42, 1, 0.5, 900);
+const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 900);
+
+let view = 'plate';
+let selected = 1;
+
+/* Игровой кадр не может вместить плиту: 96 единиц при 11…17 пикселях на
+   единицу требуют кадра 1056…1632 пикселя, а окно ниже. Поэтому игровой
+   кадр смотрит на участок с пропсами и показывает масштаб числом — иначе
+   витрина врала бы, обещая масштаб, которого в кадре нет. */
+const GAME_PPU = 12;
+
+function framePlate() {
+  perspective.near = 0.5;
+  // Вся плита в кадре: проверка «лес не закрыл дорогу» имеет смысл только
+  // на целой плите, а не на её куске. Цель смещена вправо, потому что
+  // панель слотов закрывает левый край кадра.
+  perspective.position.set(70, 68, 84);
+  perspective.lookAt(9, 0, 3);
+  return perspective;
+}
+
+function frameGame() {
+  // Ортокамера строго сверху: сравнение игрового кадра с картой идёт по
+  // форме, а перспектива сверху растягивает дальнюю половину плиты и
+  // сравнение перестаёт быть сравнением.
+  ortho.position.set(2, 300, 6.001);
+  ortho.up.set(0, 0, 1);
+  ortho.lookAt(2, 0, 6);
+  const half = renderer.domElement.height / (2 * GAME_PPU);
+  const aspect = innerWidth / innerHeight;
+  ortho.left = -half * aspect; ortho.right = half * aspect;
+  ortho.top = half; ortho.bottom = -half;
+  ortho.updateProjectionMatrix();
+  return ortho;
+}
+
+function frameSlot(n) {
+  const model = models.get(n);
+  const h = Math.max(model.height, 0.4);
+  const reach = Math.max(model.radius, 0.3);
+  const dist = h * 1.9 + reach * 2.2;
+  perspective.near = 0.05;
+  perspective.position.set(dist * 0.62, h * 0.62 + dist * 0.22, dist * 0.78);
+  perspective.lookAt(0, h * 0.5, 0);
+  return perspective;
+}
+
+// Один пропс на своей клетке рядом с остальными слотами: слоны убраны, чтобы
+// выбранный не тонул в соседях, и оставлены клетки соседей — сравнивать
+// силуэты между собой иначе незачем.
+const solo = new THREE.Group();
+scene.add(solo);
+
+function applyView() {
+  if (view === 'game') {
+    solo.visible = false;
+    for (const { mesh } of props) mesh.visible = true;
+    return frameGame();
+  }
+  if (view === 'slots') {
+    solo.visible = true;
+    const { slot } = props.find((entry) => entry.slot.n === selected);
+    // Все пропсы плиты прячутся, включая выбранный: иначе он виден сразу в
+    // двух местах — на своей клетке и в сольной группе, и сравнивать не с чем.
+    for (const entry of props) entry.mesh.visible = false;
+    solo.clear();
+    solo.add(toMesh(models.get(slot.n)));
+    return frameSlot(selected);
+  }
+  solo.visible = false;
+  for (const { mesh } of props) mesh.visible = true;
+  return framePlate();
+}
+
+let camera = applyView();
+
+function resize() {
+  renderer.setSize(innerWidth, innerHeight, false);
+  perspective.aspect = innerWidth / innerHeight;
+  perspective.updateProjectionMatrix();
+  camera = applyView();
+  render();
+}
+
+// Пикселей на единицу в игровом кадре: это и есть мера читаемости из
+// контракта, и она обязана быть видна на экране, а не в отчёте.
+const pixelsPerUnit = () => (view === 'game' ? GAME_PPU : 0);
+
+const render = () => {
+  const cam = view === 'slots' ? frameSlot(selected) : camera;
+  renderer.render(scene, cam);
+};
+
+/* ---------- панель слотов ---------- */
+
+const KIND_TITLE = {
+  tree: 'ДЕРЕВЬЯ 1…10', bush: 'КУСТАРНИКИ 11…16', rock: 'КАМНИ 17…24',
+  debris: 'УПАВШЕЕ 25…30', ruin: 'РУИНЫ 31…36', bone: 'КОСТИ 37…40',
+};
+
+const list = document.getElementById('list');
+let lastKind = null;
+for (const { slot, mesh } of props) {
+  const model = models.get(slot.n);
+  if (slot.kind !== lastKind) {
+    lastKind = slot.kind;
+    const title = document.createElement('div');
+    title.className = 'group';
+    title.textContent = KIND_TITLE[slot.kind];
+    list.appendChild(title);
+  }
+  const row = document.createElement('div');
+  row.className = 'row';
+  row.dataset.n = String(slot.n);
+  row.innerHTML =
+    `<span class="n">${slot.n}</span>` +
+    `<span class="t">${slot.name}<span class="b"> ${model.triangles} тр · ${slot.h[0]}…${slot.h[1]}</span></span>` +
+    `<span class="kind">${slot.footprint}к</span>`;
+  row.addEventListener('click', () => {
+    selected = slot.n;
+    setView('slots');
+  });
+  list.appendChild(row);
+  void mesh;
+}
+
+const markActive = () => {
+  for (const row of list.querySelectorAll('.row')) {
+    row.classList.toggle('act', view === 'slots' && Number(row.dataset.n) === selected);
+  }
+  for (const button of document.querySelectorAll('#dock button')) {
+    button.classList.toggle('act', button.dataset.view === view);
+  }
+};
+
+function setView(next) {
+  view = next;
+  camera = applyView();
+  markActive();
+  resize();
+}
+
+for (const button of document.querySelectorAll('#dock button')) {
+  button.addEventListener('click', () => setView(button.dataset.view));
+}
+
+addEventListener('resize', resize);
+
+/* ---------- сводка ---------- */
+
+const stat = document.getElementById('stat');
+const warn = document.getElementById('warn');
+const head = document.getElementById('head');
+
+const BUDGET = 20000;
+const perSlot = { tree: 600, bush: 180, rock: 350, debris: 220, ruin: 400, bone: 200 };
+const over = props.filter(({ slot, mesh }) => {
+  void mesh;
+  return models.get(slot.n).triangles > perSlot[slot.kind];
+});
+
+function summary() {
+  head.textContent = `пропсы · набор «${set.name}» · ${SLOTS.length} слотов · ${totalTriangles} тр`;
+  const ppu = pixelsPerUnit();
+  stat.innerHTML =
+    `набор <b>${set.name}</b> · слотов <b>${SLOTS.length}/40</b> · треугольников <b>${totalTriangles}</b> из <b>${BUDGET}</b><br>` +
+    `плита <b>${PLATE}×${PLATE}</b> · дорога свободна · ` +
+    (view === 'game'
+      ? `игровой масштаб <b>${ppu}</b> пикселей на единицу · дерево 7 ≈ <b>${7 * ppu}</b> px, череп 0.5 ≈ <b>${Math.round(0.5 * ppu)}</b> px`
+      : view === 'slots'
+        ? `слот <b>${selected}</b> · ${SLOTS[selected - 1].name}`
+        : `ракурс платы`);
+  warn.textContent = over.length
+    ? `превышен бюджет по позиции: ${over.map((e) => e.slot.n).join(', ')}`
+    : '';
+}
+
+markActive();
+resize();
+summary();
+
+// Сводка обновляется и на смене кадра, и по таймеру: значение пикселей на
+// единицу зависит от размера окна, а оно меняется.
+setInterval(() => { camera = applyView(); render(); summary(); }, 500);
+render();
+</script>
+</body>
+</html>
