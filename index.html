@@ -53,7 +53,8 @@
     letter-spacing:.08em;max-width:520px;pointer-events:none}
 
   #hint{position:absolute;top:62px;left:22px;z-index:6;font-size:9.5px;color:var(--dim);
-    letter-spacing:.1em;line-height:1.8;pointer-events:none;max-width:330px}
+    letter-spacing:.1em;line-height:1.8;pointer-events:none;max-width:330px;
+    text-shadow:0 1px 4px rgba(0,0,0,.9)}
 </style>
 </head>
 <body>
@@ -66,13 +67,17 @@
 
 <div id="hint">
   ПЛАСТА 96 × 96 — сетка владельца, полная клетка = единица.<br>
-  ИГРОВОЕ РАССТОЯНИЕ — тот же кадр при 11…17 пикселях на единицу.
+  ИГРОВОЕ РАССТОЯНИЕ — тот же кадр при 11…17 пикселях на единицу.<br>
+  СВОБОДНАЯ КАМЕРА — ЛКМ тянет и вертит, колесо зумит под курсором,
+  ПКМ и СКМ сдвигают, пробел с протягиванием сдвигает, «Сдвиг» — инструмент
+  сдвига, R — возврат к исходному виду.
 </div>
 
 <div id="dock">
   <button data-view="plate" class="act">Пласта 96 × 96</button>
   <button data-view="game">Игровое расстояние</button>
   <button data-view="slots">Слоты</button>
+  <button data-tool="pan">Сдвиг</button>
 </div>
 
 <div id="list"></div>
@@ -95,6 +100,12 @@ import { buildSlot } from './build.js';
      plate — вся плита 96 × 96 с дорогой, проверка «лес не закрыл дорогу»;
      game  — тот же кадр при игровом масштабе, 11…17 пикселей на единицу;
      slots — один слот крупно, проверка силуэта вблизи.
+
+   Плюс свободная камера поверх любого из трёх: она не заменяет кадры, а
+   живёт рядом, потому что три кадра отвечают на вопрос «как это выглядит
+   у владельца и в игре», а посмотреть сзади и подойти вплотную — вопрос
+   другой. Игровой кадр после этого остаётся точкой отсчёта и возвращается
+   одной клавишей.
 
    Геометрия берётся из build.js — того же кода, который пишет GLB. Второго
    пути у формы здесь нет и не должно быть: иначе витрина и игра покажут
@@ -263,6 +274,14 @@ const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 900);
 
 let view = 'plate';
 let selected = 1;
+let free = false;
+
+// Куда смотрит кадр и вокруг какой оси его можно вертеть. Свободная камера
+// берёт позу отсюда, поэтому у каждого кадра своя точка и своя ось: у
+// игрового кадра ось это +Z, и карта не переворачивается от первого движения
+// мыши.
+const frameTarget = new THREE.Vector3();
+const frameUp = new THREE.Vector3(0, 1, 0);
 
 /* Игровой кадр не может вместить плиту: 96 единиц при 11…17 пикселях на
    единицу требуют кадра 1056…1632 пикселя, а окно ниже. Поэтому игровой
@@ -270,28 +289,38 @@ let selected = 1;
    витрина врала бы, обещая масштаб, которого в кадре нет. */
 const GAME_PPU = 12;
 
-function framePlate() {
-  perspective.near = 0.5;
-  // Вся плита в кадре: проверка «лес не закрыл дорогу» имеет смысл только
-  // на целой плите, а не на её куске. Цель смещена вправо, потому что
-  // панель слотов закрывает левый край кадра.
-  perspective.position.set(70, 68, 84);
-  perspective.lookAt(9, 0, 3);
-  return perspective;
-}
-
-function frameGame() {
-  // Ортокамера строго сверху: сравнение игрового кадра с картой идёт по
-  // форме, а перспектива сверху растягивает дальнюю половину плиты и
-  // сравнение перестаёт быть сравнением.
-  ortho.position.set(2, 300, 6.001);
-  ortho.up.set(0, 0, 1);
-  ortho.lookAt(2, 0, 6);
+const sizeGameFrustum = () => {
   const half = renderer.domElement.height / (2 * GAME_PPU);
   const aspect = innerWidth / innerHeight;
   ortho.left = -half * aspect; ortho.right = half * aspect;
   ortho.top = half; ortho.bottom = -half;
   ortho.updateProjectionMatrix();
+};
+
+function framePlate() {
+  perspective.near = 0.5;
+  perspective.far = 900;
+  frameTarget.set(9, 0, 3);
+  frameUp.set(0, 1, 0);
+  // Вся плита в кадре: проверка «лес не закрыл дорогу» имеет смысл только
+  // на целой плите, а не на её куске. Цель смещена вправо, потому что
+  // панель слотов закрывает левый край кадра.
+  perspective.position.set(70, 68, 84);
+  perspective.lookAt(frameTarget);
+  return perspective;
+}
+
+function frameGame() {
+  frameTarget.set(2, 0, 6);
+  frameUp.set(0, 0, 1);
+  ortho.zoom = 1;
+  // Ортокамера строго сверху: сравнение игрового кадра с картой идёт по
+  // форме, а перспектива сверху растягивает дальнюю половину плиты и
+  // сравнение перестаёт быть сравнением.
+  ortho.position.set(2, 300, 6.001);
+  ortho.up.copy(frameUp);
+  ortho.lookAt(frameTarget);
+  sizeGameFrustum();
   return ortho;
 }
 
@@ -301,10 +330,17 @@ function frameSlot(n) {
   const reach = Math.max(model.radius, 0.3);
   const dist = h * 1.9 + reach * 2.2;
   perspective.near = 0.05;
+  perspective.far = 900;
+  frameTarget.set(0, h * 0.5, 0);
+  frameUp.set(0, 1, 0);
   perspective.position.set(dist * 0.62, h * 0.62 + dist * 0.22, dist * 0.78);
-  perspective.lookAt(0, h * 0.5, 0);
+  perspective.lookAt(frameTarget);
   return perspective;
 }
+
+const frameCamera = () => (view === 'game'
+  ? frameGame()
+  : view === 'slots' ? frameSlot(selected) : framePlate());
 
 // Один пропс на своей клетке рядом с остальными слотами: слоны убраны, чтобы
 // выбранный не тонул в соседях, и оставлены клетки соседей — сравнивать
@@ -312,45 +348,268 @@ function frameSlot(n) {
 const solo = new THREE.Group();
 scene.add(solo);
 
-function applyView() {
-  if (view === 'game') {
-    solo.visible = false;
-    for (const { mesh } of props) mesh.visible = true;
-    return frameGame();
-  }
-  if (view === 'slots') {
-    solo.visible = true;
-    const { slot } = props.find((entry) => entry.slot.n === selected);
-    // Все пропсы плиты прячутся, включая выбранный: иначе он виден сразу в
-    // двух местах — на своей клетке и в сольной группе, и сравнивать не с чем.
-    for (const entry of props) entry.mesh.visible = false;
-    solo.clear();
-    solo.add(toMesh(models.get(slot.n)));
-    return frameSlot(selected);
-  }
-  solo.visible = false;
-  for (const { mesh } of props) mesh.visible = true;
-  return framePlate();
-}
+const showProps = () => {
+  const soloed = view === 'slots';
+  solo.visible = soloed;
+  for (const { mesh } of props) mesh.visible = !soloed;
+  if (!soloed) return;
+  // Все пропсы плиты прячутся, включая выбранный: иначе он виден сразу в двух
+  // местах — на своей клетке и в сольной группе, и сравнивать не с чем.
+  solo.clear();
+  solo.add(toMesh(models.get(selected)));
+};
 
-let camera = applyView();
+/* ---------- свободная камера ---------- */
+
+/* Поза живёт не в камере, а здесь: точка, вокруг которой вертят, плюс два
+   угла, расстояние и масштаб. Камера — разновидность этого состояния, иначе
+   «вернуть исходный вид» было бы нечем: возвращать пришлось бы копию позы,
+   а копия протухает при первом же изменении размера окна.
+
+   `pivot` и `shift` — разные точки, и это не усложнение ради усложнения: при
+   зуме под курсором вертеться обязана стать та точка, что под курсором, а
+   картинка при этом обязана остаться на месте. Одним lookAt это не совмещается
+   — взгляд на точку под курсором увёл бы её в середину кадра. */
+const orbit = {
+  up: new THREE.Vector3(0, 1, 0),
+  fwd: new THREE.Vector3(0, 0, 1),
+  right: new THREE.Vector3(1, 0, 0),
+  pivot: new THREE.Vector3(),
+  shift: new THREE.Vector3(),
+  dist: 100,
+  az: 0,
+  polar: Math.PI / 2,
+  zoom: 1,
+};
+
+// Экранные оси камеры берутся из её же матрицы, а не из базиса орбиты: базис
+// поворачивается вместе с азимутом, и сдвиг по нему после оборота уводил бы
+// картинку вбок.
+const screenRight = new THREE.Vector3();
+const screenUp = new THREE.Vector3();
+
+/* Полярный угол ограничен не «чтобы не давать крутить», а потому что при
+   взгляде строго вдоль оси lookAt вырождается и three подставляет свою
+   произвольную ориентацию — кадр щёлкает на плюс. 0.002 радиана на дистанции
+   игрового кадра это 0.6 единицы, глазом неотличимо от строго сверху. */
+const POLAR_MIN = 0.002;
+const DIST_MIN = 0.05;
+const DIST_MAX = 900;
+const ZOOM_MIN = 0.02;
+const ZOOM_MAX = 40;
+let panTool = false;
+let space = false;
+let drag = null;
+
+const setAngles = (direction) => {
+  orbit.polar = Math.acos(THREE.MathUtils.clamp(direction.dot(orbit.up), -1, 1));
+  orbit.az = Math.atan2(direction.dot(orbit.right), direction.dot(orbit.fwd));
+};
+
+// Направление от точки вращения к камере по текущим углам.
+const offsetDirection = () => new THREE.Vector3().copy(orbit.fwd).multiplyScalar(Math.cos(orbit.az))
+  .addScaledVector(orbit.right, Math.sin(orbit.az))
+  .multiplyScalar(Math.sin(orbit.polar))
+  .addScaledVector(orbit.up, Math.cos(orbit.polar));
+
+// Захват позы кадра. Ось орбиты берётся у самой камеры, поэтому игровой кадр
+// вертится вокруг +Z и север карты остаётся сверху.
+const capture = () => {
+  orbit.up.copy(frameUp);
+  const eye = new THREE.Vector3().subVectors(camera.position, frameTarget);
+  orbit.dist = THREE.MathUtils.clamp(eye.length(), DIST_MIN, DIST_MAX);
+  const direction = eye.divideScalar(orbit.dist);
+  orbit.fwd.copy(direction).addScaledVector(orbit.up, -direction.dot(orbit.up));
+  if (orbit.fwd.lengthSq() < 1e-8) {
+    orbit.fwd.set(0, 1, 0);
+    if (Math.abs(orbit.up.y) > 0.9) orbit.fwd.set(0, 0, 1);
+    orbit.fwd.addScaledVector(orbit.up, -orbit.fwd.dot(orbit.up));
+  }
+  orbit.fwd.normalize();
+  orbit.right.crossVectors(orbit.up, orbit.fwd).normalize();
+  orbit.pivot.copy(frameTarget);
+  // У кадра точка взгляда и есть точка вращения, сдвиг с нуля.
+  orbit.shift.set(0, 0, 0);
+  orbit.zoom = camera.isOrthographicCamera ? camera.zoom : 1;
+  setAngles(direction);
+};
+
+const lookTarget = () => new THREE.Vector3().addVectors(orbit.pivot, orbit.shift);
+
+const applyFree = () => {
+  camera.position.copy(orbit.pivot).addScaledVector(offsetDirection(), orbit.dist);
+  camera.up.copy(orbit.up);
+  camera.lookAt(lookTarget());
+  if (camera.isOrthographicCamera) {
+    camera.zoom = orbit.zoom;
+  } else {
+    // near и far обязаны ехать за расстоянием: подойдя вплотную, камера
+    // срезала бы модель ближней плоскостью, а far не доставал бы до плиты.
+    camera.near = Math.max(0.02, orbit.dist * 0.02);
+    camera.far = camera.near + 2000;
+  }
+  camera.updateProjectionMatrix();
+  camera.updateMatrixWorld(true);
+  screenRight.setFromMatrixColumn(camera.matrixWorld, 0);
+  screenUp.setFromMatrixColumn(camera.matrixWorld, 1);
+  return camera;
+};
+
+const takeOver = () => {
+  if (free) return;
+  free = true;
+  capture();
+};
+
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+const look = new THREE.Vector3();
+
+// Единиц мира на пиксель на глубине точки взгляда: сдвиг камеры в плоскости
+// кадра на столько и сдвигает картинку.
+const unitsPerPixel = () => (camera.isOrthographicCamera
+  ? (camera.top - camera.bottom) / innerHeight / camera.zoom
+  : 2 * camera.position.distanceTo(lookTarget())
+    * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) / innerHeight);
+
+// Точка под курсором на глубине точки взгляда. Именно на этой глубине сдвиг
+// камеры в плоскости кадра не двигает видимую точку.
+const cursorPoint = (x, y) => {
+  pointer.set((x / innerWidth) * 2 - 1, -(y / innerHeight) * 2 + 1);
+  raycaster.setFromCamera(pointer, camera);
+  camera.getWorldDirection(look);
+  const depth = new THREE.Vector3().subVectors(lookTarget(), camera.position).dot(look);
+  const along = raycaster.ray.direction.dot(look);
+  return raycaster.ray.at(Math.max(depth, DIST_MIN) / Math.max(along, 0.1), new THREE.Vector3());
+};
+
+const zoomAt = (x, y, factor) => {
+  const point = cursorPoint(x, y);
+  if (camera.isOrthographicCamera) {
+    // У ортокамеры картинка не зависит от расстояния: зум это масштаб, а точку
+    // под курсором держит параллельный сдвиг камеры и цели. Точку вращения
+    // сдвигаем вместе с ними — поставить её в точку под курсором нельзя, от
+    // этого камера переехала бы вместо кадра.
+    const offset = new THREE.Vector3().subVectors(point, camera.position);
+    const shift = 1 - 1 / factor;
+    orbit.pivot.addScaledVector(screenRight, shift * offset.dot(screenRight))
+      .addScaledVector(screenUp, shift * offset.dot(screenUp));
+    orbit.zoom = THREE.MathUtils.clamp(orbit.zoom * factor, ZOOM_MIN, ZOOM_MAX);
+  } else {
+    // Наезд на точку под курсором при неизменном направлении взгляда: точка
+    // остаётся пиксель в пиксель на месте. Точка вращения встаёт в неё, а
+    // взгляд остаётся на прежнем месте оси, иначе кадр уехал бы.
+    const toPoint = new THREE.Vector3().subVectors(point, camera.position);
+    const distance = Math.max(toPoint.length(), DIST_MIN);
+    camera.position.copy(point)
+      .addScaledVector(toPoint.divideScalar(distance), -(distance / factor));
+    orbit.shift.copy(camera.position)
+      .addScaledVector(look, distance / factor)
+      .sub(point);
+    orbit.pivot.copy(point);
+    orbit.dist = THREE.MathUtils.clamp(distance / factor, DIST_MIN, DIST_MAX);
+    setAngles(new THREE.Vector3().subVectors(camera.position, orbit.pivot).normalize());
+  }
+  applyFree();
+  render();
+  // Число пикселей на единицу в игровом кадре меняется вместе с зумом, и
+  // ждать его обновления по таймеру нельзя: кадр врёт ровно в том, ради чего
+  // он поставлен.
+  summary();
+};
+
+const canvas = renderer.domElement;
+
+// Правая кнопка на холсте не должна вызывать меню браузера: она сдвигает.
+canvas.addEventListener('contextmenu', (event) => event.preventDefault());
+
+canvas.addEventListener('pointerdown', (event) => {
+  if (event.pointerType === 'touch') return;
+  drag = { x: event.clientX, y: event.clientY, pan: event.button !== 0 || space || panTool };
+  canvas.setPointerCapture(event.pointerId);
+  takeOver();
+  applyFree();
+  summary();
+});
+
+canvas.addEventListener('pointermove', (event) => {
+  if (!drag) return;
+  const dx = event.clientX - drag.x;
+  const dy = event.clientY - drag.y;
+  drag.x = event.clientX;
+  drag.y = event.clientY;
+  if (drag.pan) {
+    const step = unitsPerPixel();
+    orbit.pivot.addScaledVector(screenRight, -dx * step)
+      .addScaledVector(screenUp, dy * step);
+  } else {
+    const turn = (2 * Math.PI) / innerHeight;
+    const was = new THREE.Vector3().subVectors(camera.position, orbit.pivot).normalize();
+    orbit.az -= dx * turn;
+    orbit.polar = THREE.MathUtils.clamp(orbit.polar - dy * turn, POLAR_MIN, Math.PI - POLAR_MIN);
+    // Кадр поворачивается вместе с камерой: точка взгляда получает тот же
+    // поворот, что и камера, иначе после оборота кадр уехал бы вбок.
+    const now = offsetDirection();
+    const axis = new THREE.Vector3().crossVectors(was, now);
+    const sin = axis.length();
+    if (sin > 1e-9) {
+      orbit.shift.applyAxisAngle(axis.divideScalar(sin), Math.atan2(sin, was.dot(now)));
+    }
+  }
+  applyFree();
+  render();
+});
+
+const dropDrag = (event) => {
+  drag = null;
+  if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+};
+canvas.addEventListener('pointerup', dropDrag);
+canvas.addEventListener('pointercancel', dropDrag);
+
+// Колесо: экспонента вместо множителя на шаг, потому что трекпад шлёт
+// deltaY помельче, чем колёсико, и шаг должен быть одинаково мелким.
+canvas.addEventListener('wheel', (event) => {
+  event.preventDefault();
+  takeOver();
+  applyFree();
+  zoomAt(event.clientX, event.clientY, Math.exp(-event.deltaY * 0.0012));
+}, { passive: false });
+
+addEventListener('keydown', (event) => {
+  if (event.code === 'Space') {
+    space = true;
+    event.preventDefault();
+    return;
+  }
+  if (event.code !== 'KeyR') return;
+  // R — возврат к исходному виду: восстанавливается кадр целиком, вместе с
+  // осью орбиты и зумом, иначе «вернуть» означало бы «вернуть не туда».
+  free = false;
+  resize();
+  summary();
+});
+
+addEventListener('keyup', (event) => { if (event.code === 'Space') space = false; });
+addEventListener('blur', () => { space = false; drag = null; });
+
+let camera = perspective;
 
 function resize() {
   renderer.setSize(innerWidth, innerHeight, false);
   perspective.aspect = innerWidth / innerHeight;
   perspective.updateProjectionMatrix();
-  camera = applyView();
+  if (view === 'game') sizeGameFrustum();
+  camera = free ? applyFree() : frameCamera();
   render();
 }
 
 // Пикселей на единицу в игровом кадре: это и есть мера читаемости из
-// контракта, и она обязана быть видна на экране, а не в отчёте.
-const pixelsPerUnit = () => (view === 'game' ? GAME_PPU : 0);
+// контракта, и она обязана быть видна на экране, а не в отчёте. Свободный зум
+// честно меняет масштаб, поэтому и число на экране меняется вместе с ним.
+const pixelsPerUnit = () => (view === 'game' ? GAME_PPU * (free ? orbit.zoom : 1) : 0);
 
-const render = () => {
-  const cam = view === 'slots' ? frameSlot(selected) : camera;
-  renderer.render(scene, cam);
-};
+const render = () => renderer.render(scene, camera);
 
 /* ---------- панель слотов ---------- */
 
@@ -392,17 +651,31 @@ const markActive = () => {
   for (const button of document.querySelectorAll('#dock button')) {
     button.classList.toggle('act', button.dataset.view === view);
   }
+  for (const button of document.querySelectorAll('#dock button[data-tool]')) {
+    button.classList.toggle('act', panTool);
+  }
 };
 
 function setView(next) {
   view = next;
-  camera = applyView();
+  free = false;
+  showProps();
   markActive();
   resize();
+  summary();
 }
 
-for (const button of document.querySelectorAll('#dock button')) {
+for (const button of document.querySelectorAll('#dock button[data-view]')) {
   button.addEventListener('click', () => setView(button.dataset.view));
+}
+
+// Инструмент сдвига: тот же сдвиг, что правой кнопкой и пробелом, но без
+// модификатора — тянуть можно не отпуская взгляд от кадра.
+for (const button of document.querySelectorAll('#dock button[data-tool]')) {
+  button.addEventListener('click', () => {
+    panTool = !panTool;
+    markActive();
+  });
 }
 
 addEventListener('resize', resize);
@@ -422,15 +695,16 @@ const over = props.filter(({ slot, mesh }) => {
 
 function summary() {
   head.textContent = `пропсы · набор «${set.name}» · ${SLOTS.length} слотов · ${totalTriangles} тр`;
-  const ppu = pixelsPerUnit();
+  const ppu = Math.round(pixelsPerUnit() * 10) / 10;
+  const state = free ? ' · <b>свободная камера</b>' : '';
   stat.innerHTML =
     `набор <b>${set.name}</b> · слотов <b>${SLOTS.length}/40</b> · треугольников <b>${totalTriangles}</b> из <b>${BUDGET}</b><br>` +
     `плита <b>${PLATE}×${PLATE}</b> · дорога свободна · ` +
     (view === 'game'
-      ? `игровой масштаб <b>${ppu}</b> пикселей на единицу · дерево 7 ≈ <b>${7 * ppu}</b> px, череп 0.5 ≈ <b>${Math.round(0.5 * ppu)}</b> px`
+      ? `игровой масштаб <b>${ppu}</b> пикселей на единицу · дерево 7 ≈ <b>${Math.round(7 * ppu)}</b> px, череп 0.5 ≈ <b>${Math.round(0.5 * ppu)}</b> px${state}`
       : view === 'slots'
-        ? `слот <b>${selected}</b> · ${SLOTS[selected - 1].name}`
-        : `ракурс платы`);
+        ? `слот <b>${selected}</b> · ${SLOTS[selected - 1].name}${state}`
+        : `ракурс платы${state}`);
   warn.textContent = over.length
     ? `превышен бюджет по позиции: ${over.map((e) => e.slot.n).join(', ')}`
     : '';
@@ -440,9 +714,10 @@ markActive();
 resize();
 summary();
 
-// Сводка обновляется и на смене кадра, и по таймеру: значение пикселей на
-// единицу зависит от размера окна, а оно меняется.
-setInterval(() => { camera = applyView(); render(); summary(); }, 500);
+// Кадр пересобирается только на смене вида и на resize: пересборка по таймеру
+// затирала бы свободную камеру, а считать больше нечего — сводка меняется
+// только от этих двух событий.
+setInterval(() => { render(); summary(); }, 500);
 render();
 </script>
 </body>

@@ -19,9 +19,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
 
 const problems = [];
-const warnings = [];
 const fail = (message) => problems.push(message);
-const warn = (message) => warnings.push(message);
 
 // Границы из контракта. Держатся здесь, а не берутся из документа: проверка
 // обязана работать без чтения markdown, иначе она сломается вместе с ним.
@@ -202,27 +200,38 @@ const round = (value) => Math.round(value * 1000) / 1000;
 // Реестр живёт в коде, но источник истины — docs/CONTRACT.md. Если таблица
 // разошлась с кодом, одна из двух сторон врёт, и это надо видеть.
 //
-// Расхождение здесь — ПРЕДУПРЕЖДЕНИЕ, а не падение, и это осознанно: контракт
-// и задание штаба описывают слот 25 разными `footprint`, и ни одна сторона
-// не может решить это за владельца. Обязательный список падений задан
-// заданием и он ниже; подмена его документной сверкой означала бы, что
-// витрина зеленеет только при безусловном согласии двух текстов.
+// Расхождение здесь — ПАДЕНИЕ, а не предупреждение. Контракт объявлен
+// единственным источником истины, и предупреждение делало его декорацией:
+// следующее расхождение прошло бы молча, а молчаливое расхождение документа с
+// кодом — это не «неаккуратно», это слот, который в игре поведёт себя не так,
+// как обещает таблица. Спорные места решаются правкой документа или кода
+// владельцем, а не тишиной.
+//
+// Таблица обязана читаться целиком: пропущенная строка при старом коде
+// проверялась бы «успешно», просто потому что о ней никто не спросил.
 
 const checkContractTable = () => {
   const text = readFileSync(join(root, 'docs', 'CONTRACT.md'), 'utf8');
   const rows = [...text.matchAll(/^\|\s*(\d+)\s*\|\s*`(\w+)`\s*\|\s*(\d)\s*\|\s*(да|нет)\s*\|/gm)];
   if (rows.length === 0) {
-    warn('CONTRACT.md: таблица реестра не найдена или её формат разошёлся');
+    fail('CONTRACT.md: таблица реестра не найдена или её формат разошёлся — сверять нечего');
     return;
+  }
+  const numbers = new Set(rows.map(([, n]) => Number(n)));
+  if (rows.length !== 40 || numbers.size !== 40) {
+    fail(
+      `CONTRACT.md: в таблице реестра ${rows.length} строк и ${numbers.size} номеров, ` +
+        `а реестр это 1…40. Сверка молча пропустила бы номера, которых в документе нет`,
+    );
   }
   for (const [, n, kind, footprint, solid] of rows) {
     const slot = SLOTS.find((entry) => entry.n === Number(n));
-    if (!slot) { warn(`CONTRACT.md: слот ${n} есть в документе, но нет в реестре`); continue; }
-    if (slot.kind !== kind) warn(`CONTRACT.md, слот ${n}: kind ${slot.kind} против ${kind} в документе`);
+    if (!slot) { fail(`CONTRACT.md, слот ${n}: есть в документе, но нет в реестре`); continue; }
+    if (slot.kind !== kind) fail(`CONTRACT.md, слот ${n}: kind ${slot.kind} против ${kind} в документе`);
     if (slot.footprint !== Number(footprint)) {
-      warn(`CONTRACT.md, слот ${n}: footprint ${slot.footprint} против ${footprint} в документе`);
+      fail(`CONTRACT.md, слот ${n}: footprint ${slot.footprint} против ${footprint} в документе`);
     }
-    if (slot.solid !== (solid === 'да')) warn(`CONTRACT.md, слот ${n}: solid ${slot.solid} против ${solid}`);
+    if (slot.solid !== (solid === 'да')) fail(`CONTRACT.md, слот ${n}: solid ${slot.solid} против ${solid}`);
   }
 };
 
@@ -246,10 +255,6 @@ for (const [id, set] of Object.entries(SETS)) {
   }
 }
 
-if (warnings.length) {
-  console.log('\nРасхождения документов (решает владелец):');
-  for (const warning of warnings) console.log(`  ! ${warning}`);
-}
 if (problems.length) {
   console.error('\nПРОБЛЕМЫ КОНТРАКТА:');
   for (const problem of problems) console.error(`  - ${problem}`);
